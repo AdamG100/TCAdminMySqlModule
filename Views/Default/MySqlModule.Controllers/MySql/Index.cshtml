@@ -1,4 +1,4 @@
-﻿@model MySqlModule.Models.MySql.MySqlModel
+@model MySqlModule.Models.MySql.MySqlModel
 
 @{
     Page.Title = "MySql Management";
@@ -19,16 +19,16 @@
 <link rel="stylesheet" href="../Views/@TCAdmin.SDK.Web.MVC.Template.GetSelectedTemplate()/ThemeBuilder.css">
 <style>body { line-height: 1.2 !important; } </style>
 <br/><div class="row" style="margin: 5px;">
-    <!-- Name Card -->
+    <!-- Databases Allowed Card -->
     <div class="col-auto col-xl-3">
-            <div class="k-card col-auto">
-                <div class="k-card-body">
-                    <div class="k-card-title font-weight-bold text-primary">Databases Allowed: </div>
-                    <div class="k-card-text h5 mb-0">@Model.CurrentDatabases/@Model.MaxDatabases</div>
-                </div>
+        <div class="k-card col-auto">
+            <div class="k-card-body">
+                <div class="k-card-title font-weight-bold text-primary">Databases Allowed: </div>
+                <div class="k-card-text h5 mb-0">@Model.CurrentDatabases/@Model.MaxDatabases</div>
             </div>
         </div>
-    <!-- Name Card -->
+    </div>
+    <!-- Eligible Locations Card -->
     <div class="col-auto col-xl-3">
         <div class="k-card col-auto">
             <div class="k-card-body">
@@ -42,44 +42,90 @@
 <div class="row" style="margin: 5px;">
     @Html.Action("DatabasesGrid", "MySql")
     <div class="col-auto col-xl-4 col-lg-5">
-        <!-- Service Status Card -->
+        <!-- Manage Databases Card -->
         <div class="k-card shadow mb-4">
-            <!-- Card Header - Accordion -->
-            <div id="#CreateSQLCard" class="card-header py-3 d-flex flex-row align-items-center justify-content-between">
+            <div id="#ManageSQLCard" class="card-header py-3 d-flex flex-row align-items-center justify-content-between">
                 <h6 class="m-0 font-weight-bold text-primary">Manage Databases</h6>
             </div>
             <div class="k-card-body">
                 <div class="row">
                     <div class="col-l-3 col-auto" style="padding: 10px;">
+
+                        @* ── Create ── *@
                         @if (Model.CurrentDatabases < Model.MaxDatabases)
                         {
                             using (Ajax.BeginForm("CreateDatabase", "MySql", null))
                             {
                                 <h6>Create Database</h6>
                                 @Html.Kendo().TextBoxFor(model => model.CreationUsername).Name("requestDbUsername").Enable(false).HtmlAttributes(new {disabled = true, style = "width: auto;", @class = "k-primary"})
-                                @Html.Kendo().TextBox().Name("requestDbName").HtmlAttributes(new { @class = "k-input"})<br/><br/>
+                                @Html.Kendo().TextBox().Name("requestDbName").HtmlAttributes(new { @class = "k-input" })<br/><br/>
                                 <h6>For Service: </h6>
                                 @Html.Kendo().DropDownList().Name("requestServiceId1").BindTo(Model.CreationServiceIds).HtmlAttributes(new {style = "margin: 10px", @class = "k-primary"})
-                                @Html.Kendo().Button().Name("Create").Content("Create").HtmlAttributes(new  {style = "margin-bottom: 10px; margin-top: 10px;", @class = "k-primary"})
+                                @Html.Kendo().Button().Name("Create").Content("Create").HtmlAttributes(new { style = "margin-bottom: 10px; margin-top: 10px;", @class = "k-primary" })
                             }
-                        }<br/>
-                        @if(Model.CurrentDatabases > 0){
+                        }
+                        <br/>
+
+                        @if (Model.CurrentDatabases > 0)
+                        {
+                            @* ── Delete ── *@
                             using (Ajax.BeginForm("DeleteDatabase", "MySql", null))
                             {
                                 <h6>Delete Database</h6>
                                 @Html.Kendo().DropDownList().Name("requestServiceId2").BindTo(Model.DeletionUsernames).HtmlAttributes(new {style = "margin: 10px", @class = "k-primary"})
-                                @Html.Kendo().Button().Name("Delete").Content("Delete").HtmlAttributes(new {@class = "k-primary"})
-                            }<br/>
+                                @Html.Kendo().Button().Name("Delete").Content("Delete").HtmlAttributes(new { @class = "k-primary" })
+                            }
+                            <br/>
+
+                            @* ── Reset Password ── *@
                             using (Ajax.BeginForm("ResetPassword", "MySql", null))
                             {
                                 <h6>Reset Database Password</h6>
                                 @Html.Kendo().DropDownList().Name("requestServiceId3").BindTo(Model.ResetUsernames).HtmlAttributes(new {style = "margin: 10px", @class = "k-primary"})
-                                @Html.Kendo().Button().Name("Reset").Content("Reset").HtmlAttributes(new {@class = "k-primary"})
+                                @Html.Kendo().Button().Name("Reset").Content("Reset").HtmlAttributes(new { @class = "k-primary" })
                             }
+                            <br/>
+
+                            @* ── Restore Backup ── *@
+                            <h6>Restore Database Backup</h6>
+                            <p style="font-size: 0.85em; color: #888;">Upload a <code>.sql</code> file exported from this module or from mysqldump. This will overwrite the current database contents.</p>
+                            <form id="restoreForm" enctype="multipart/form-data" style="display:inline;">
+                                @Html.Kendo().DropDownList().Name("requestServiceId").BindTo(Model.DeletionUsernames).HtmlAttributes(new {style = "margin: 10px", @class = "k-primary"})
+                                <input type="file" name="backupFile" accept=".sql" class="k-textbox" style="margin: 5px;" /><br/><br/>
+                                @Html.Kendo().Button().Name("RestoreBtn").Content("Restore").HtmlAttributes(new { @class = "k-primary", onclick = "submitRestore(); return false;" })
+                            </form>
                         }
+
                     </div>
                 </div>
             </div>
         </div>
     </div>
 </div>
+
+<script>
+    function submitRestore() {
+        var serviceId = $("#requestServiceId").val();
+        var fileInput = document.querySelector('#restoreForm input[type=file]');
+        if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+            TCAdmin.Ajax.ShowBasicDialog('Error', 'Please select a .sql file to restore.');
+            return;
+        }
+        $('body').css('cursor', 'wait');
+        var formData = new FormData();
+        formData.append('requestServiceId', serviceId);
+        formData.append('backupFile', fileInput.files[0]);
+        $.ajax({
+            url: '@Url.Action("RestoreBackup", "MySql")',
+            type: 'POST',
+            data: formData,
+            processData: false,
+            contentType: false,
+            success: function (result) { $('body').css('cursor', 'default'); eval(result); },
+            error: function () {
+                $('body').css('cursor', 'default');
+                TCAdmin.Ajax.ShowBasicDialog('Error', 'An unexpected error occurred during restore.');
+            }
+        });
+    }
+</script>

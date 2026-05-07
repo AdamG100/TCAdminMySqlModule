@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:docs.tcadmin.com)",
+      "WebFetch(domain:help.tcadmin.com)",
+      "WebSearch"
+    ]
+  }
+}
