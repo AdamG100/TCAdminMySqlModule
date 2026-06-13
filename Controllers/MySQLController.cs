@@ -4,10 +4,12 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Web;
 using System.Web.Mvc;
 using Kendo.Mvc.Extensions;
 using Kendo.Mvc.UI;
 using MySql.Data.MySqlClient;
+using MySqlModule.Helpers;
 using MySqlModule.Models.MySql;
 using TCAdmin.SDK.Objects;
 using TCAdmin.SDK.Web.MVC.Controllers;
@@ -21,9 +23,13 @@ namespace MySqlModule.Controllers
         [HttpGet]
         public ActionResult Index()
         {
+            RestoreMissingVariables();
+
+            var databases = GetUserDatabases();
             var model = new MySqlModel
             {
-                CurrentDatabases = GetUserDatabases().Count,
+                Databases = databases,
+                CurrentDatabases = databases.Count,
                 MaxDatabases = GetUserServicesCount(),
                 CreationServiceIds = GetUserServices(),
                 EligibleLocations = GetLocations(),
@@ -35,20 +41,6 @@ namespace MySqlModule.Controllers
             return View(model);
         }
 
-        [HttpGet]
-        public ActionResult DatabasesGrid()
-        {
-            return PartialView("_Databases");
-        }
-
-        [HttpPost]
-        [ParentAction("MySql", "Index")]
-        public ActionResult DatabasesByUserRead([DataSourceRequest] DataSourceRequest request)
-        {
-            var databases = GetUserDatabases();
-            return Json(databases.ToDataSourceResult(request), JsonRequestBehavior.AllowGet);
-        }
-
         [HttpPost]
         public ActionResult CreateDatabase(int requestServiceId1, string requestDbName)
         {
@@ -57,6 +49,8 @@ namespace MySqlModule.Controllers
                 return JavaScript(
                     "TCAdmin.Ajax.ShowBasicDialog('Error', 'You have reached your database limit!');$('body').css('cursor', 'default');");
             }
+
+            requestDbName = (requestDbName ?? string.Empty).Trim();
 
             if (string.IsNullOrEmpty(requestDbName))
             {
@@ -84,45 +78,52 @@ namespace MySqlModule.Controllers
                 ObjectBase.GlobalSkipSecurityCheck = true;
 
                 var service = new Service(requestServiceId1);
-                var server = new Server(service.ServerId);
-                var datacenter = new Datacenter(server.DatacenterId);
+                var config = MySqlStore.GetHostConfig(service);
 
-                var dbUser = $"{user.UserName}_{service.ServiceId}";
-                var dbName = $"{user.UserName}_{requestDbName.Replace(" ", "_")}";
-                var dbPass = System.Web.Security.Membership.GeneratePassword(12, 2);
+                // Sanitise the TCAdmin username for use in MySQL identifiers — replace any
+                // character that isn't alphanumeric or underscore (e.g. hyphens) with an
+                // underscore rather than rejecting the whole request.
+                var safeUsername = Regex.Replace(user.UserName, "[^_a-zA-Z0-9]", "_");
+                var dbUser = $"{safeUsername}_{service.ServiceId}";
+                var dbName = $"{safeUsername}_{requestDbName.Replace(" ", "_")}";
+                var dbPass = MySqlStore.GeneratePassword();
 
-                string host, rootUser, rootPass;
-
-                if (server.MySqlPluginUseDatacenter && !string.IsNullOrEmpty(datacenter.MySqlPluginIp))
-                {
-                    host = datacenter.MySqlPluginIp;
-                    rootUser = datacenter.MySqlPluginRoot;
-                    rootPass = datacenter.MySqlPluginPassword;
-                }
-                else if (!server.MySqlPluginUseDatacenter && !string.IsNullOrEmpty(server.MySqlPluginIp))
-                {
-                    host = server.MySqlPluginIp;
-                    rootUser = server.MySqlPluginRoot;
-                    rootPass = server.MySqlPluginPassword;
-                }
-                else
+                if (!config.IsConfigured)
                 {
                     return JavaScript(
                         "TCAdmin.Ajax.ShowBasicDialog('Error', 'An Administrator has not configured the location of this service for the MySql Module!');$('body').css('cursor', 'default');");
                 }
 
+                if (dbName.Length > 64 || dbUser.Length > 32)
+                {
+                    return JavaScript(
+                        "TCAdmin.Ajax.ShowBasicDialog('Error', 'That database name is too long. Please choose a shorter name!');$('body').css('cursor', 'default');");
+                }
+
                 try
                 {
-                    using (var conn = new MySqlConnection($"server={host};user={rootUser};password={rootPass};SSL Mode=None;"))
+                    using (var conn = new MySqlConnection(config.GetConnectionString()))
                     {
                         conn.Open();
-                        Execute(conn, $"CREATE DATABASE `{dbName}`;");
+
+                        // If this service already has a database on record, its variables were
+                        // wiped externally - restore them instead of creating a duplicate.
+                        var existing = MySqlStore.TryGetRecord(conn, service.ServiceId);
+                        if (existing != null)
+                        {
+                            MySqlStore.ApplyVariables(service, config.Host, existing.Username, existing.Password, existing.Database);
+                            return JavaScript("window.location.reload(false);");
+                        }
+
+                        MySqlStore.Execute(conn, $"CREATE DATABASE `{dbName}`;");
                         var createUserCmd = conn.CreateCommand();
                         createUserCmd.CommandText = $"CREATE USER '{dbUser}'@'%' IDENTIFIED BY @pass;";
                         createUserCmd.Parameters.AddWithValue("@pass", dbPass);
                         createUserCmd.ExecuteNonQuery();
-                        Execute(conn, $"GRANT ALL PRIVILEGES ON `{dbName}`.* TO '{dbUser}'@'%';");
-                        Execute(conn, "FLUSH PRIVILEGES;");
+                        MySqlStore.Execute(conn, $"GRANT ALL PRIVILEGES ON `{dbName}`.* TO '{dbUser}'@'%';");
+                        MySqlStore.Execute(conn, "FLUSH PRIVILEGES;");
+
+                        MySqlStore.TryUpsert(conn, service.ServiceId, dbUser, dbName, dbPass, config.Host);
                     }
                 }
                 catch
@@ -131,11 +132,7 @@ namespace MySqlModule.Controllers
                         "TCAdmin.Ajax.ShowBasicDialog('Error', 'Unable to connect to the remote MySQL host. Please contact an Administrator!');$('body').css('cursor', 'default');");
                 }
 
-                service.Variables["_MySQLPlugin::Host"] = host;
-                service.Variables["_MySQLPlugin::Username"] = dbUser;
-                service.Variables["_MySQLPlugin::Password"] = dbPass;
-                service.Variables["_MySQLPlugin::Database"] = dbName;
-                service.Save();
+                MySqlStore.ApplyVariables(service, config.Host, dbUser, dbPass, dbName);
             }
             finally
             {
@@ -162,11 +159,10 @@ namespace MySqlModule.Controllers
                 ObjectBase.GlobalSkipSecurityCheck = true;
 
                 var service = new Service(requestServiceId2);
-                var server = new Server(service.ServerId);
-                var datacenter = new Datacenter(server.DatacenterId);
+                var config = MySqlStore.GetHostConfig(service);
 
-                var dbUser = service.Variables["_MySQLPlugin::Username"]?.ToString();
-                var dbName = service.Variables["_MySQLPlugin::Database"]?.ToString();
+                var dbUser = service.Variables[MySqlStore.UsernameVariable]?.ToString();
+                var dbName = service.Variables[MySqlStore.DatabaseVariable]?.ToString();
 
                 if (string.IsNullOrEmpty(dbUser) || string.IsNullOrEmpty(dbName))
                 {
@@ -174,28 +170,20 @@ namespace MySqlModule.Controllers
                         "TCAdmin.Ajax.ShowBasicDialog('Error', 'No database is configured for this service!');$('body').css('cursor', 'default');");
                 }
 
-                string host, rootUser, rootPass;
-
-                if (server.MySqlPluginUseDatacenter)
+                if (!config.IsConfigured)
                 {
-                    host = datacenter.MySqlPluginIp;
-                    rootUser = datacenter.MySqlPluginRoot;
-                    rootPass = datacenter.MySqlPluginPassword;
-                }
-                else
-                {
-                    host = server.MySqlPluginIp;
-                    rootUser = server.MySqlPluginRoot;
-                    rootPass = server.MySqlPluginPassword;
+                    return JavaScript(
+                        "TCAdmin.Ajax.ShowBasicDialog('Error', 'An Administrator has not configured the location of this service for the MySql Module!');$('body').css('cursor', 'default');");
                 }
 
                 try
                 {
-                    using (var conn = new MySqlConnection($"server={host};user={rootUser};password={rootPass};SSL Mode=None;"))
+                    using (var conn = new MySqlConnection(config.GetConnectionString()))
                     {
                         conn.Open();
-                        Execute(conn, $"DROP USER IF EXISTS '{dbUser}'@'%';");
-                        Execute(conn, $"DROP DATABASE IF EXISTS `{dbName}`;");
+                        MySqlStore.Execute(conn, $"DROP USER IF EXISTS '{dbUser}'@'%';");
+                        MySqlStore.Execute(conn, $"DROP DATABASE IF EXISTS `{dbName}`;");
+                        MySqlStore.TryDelete(conn, service.ServiceId);
                     }
                 }
                 catch
@@ -204,11 +192,7 @@ namespace MySqlModule.Controllers
                         "TCAdmin.Ajax.ShowBasicDialog('Error', 'Unable to connect to the remote MySQL host. Please contact an Administrator!');$('body').css('cursor', 'default');");
                 }
 
-                service.Variables["_MySQLPlugin::Host"] = string.Empty;
-                service.Variables["_MySQLPlugin::Username"] = string.Empty;
-                service.Variables["_MySQLPlugin::Password"] = string.Empty;
-                service.Variables["_MySQLPlugin::Database"] = string.Empty;
-                service.Save();
+                MySqlStore.ClearVariables(service);
             }
             finally
             {
@@ -235,11 +219,11 @@ namespace MySqlModule.Controllers
                 ObjectBase.GlobalSkipSecurityCheck = true;
 
                 var service = new Service(requestServiceId3);
-                var server = new Server(service.ServerId);
-                var datacenter = new Datacenter(server.DatacenterId);
+                var config = MySqlStore.GetHostConfig(service);
 
-                var dbUser = service.Variables["_MySQLPlugin::Username"]?.ToString();
-                var dbPass = System.Web.Security.Membership.GeneratePassword(12, 2);
+                var dbUser = service.Variables[MySqlStore.UsernameVariable]?.ToString();
+                var dbName = service.Variables[MySqlStore.DatabaseVariable]?.ToString();
+                var dbPass = MySqlStore.GeneratePassword();
 
                 if (string.IsNullOrEmpty(dbUser))
                 {
@@ -247,30 +231,22 @@ namespace MySqlModule.Controllers
                         "TCAdmin.Ajax.ShowBasicDialog('Error', 'No database is configured for this service!');$('body').css('cursor', 'default');");
                 }
 
-                string host, rootUser, rootPass;
-
-                if (server.MySqlPluginUseDatacenter)
+                if (!config.IsConfigured)
                 {
-                    host = datacenter.MySqlPluginIp;
-                    rootUser = datacenter.MySqlPluginRoot;
-                    rootPass = datacenter.MySqlPluginPassword;
-                }
-                else
-                {
-                    host = server.MySqlPluginIp;
-                    rootUser = server.MySqlPluginRoot;
-                    rootPass = server.MySqlPluginPassword;
+                    return JavaScript(
+                        "TCAdmin.Ajax.ShowBasicDialog('Error', 'An Administrator has not configured the location of this service for the MySql Module!');$('body').css('cursor', 'default');");
                 }
 
                 try
                 {
-                    using (var conn = new MySqlConnection($"server={host};user={rootUser};password={rootPass};SSL Mode=None;"))
+                    using (var conn = new MySqlConnection(config.GetConnectionString()))
                     {
                         conn.Open();
                         var alterCmd = conn.CreateCommand();
                         alterCmd.CommandText = $"ALTER USER '{dbUser}'@'%' IDENTIFIED BY @pass;";
                         alterCmd.Parameters.AddWithValue("@pass", dbPass);
                         alterCmd.ExecuteNonQuery();
+                        MySqlStore.TryUpsert(conn, service.ServiceId, dbUser, dbName, dbPass, config.Host);
                     }
                 }
                 catch
@@ -279,7 +255,7 @@ namespace MySqlModule.Controllers
                         "TCAdmin.Ajax.ShowBasicDialog('Error', 'Unable to connect to the remote MySQL host. Please contact an Administrator!');$('body').css('cursor', 'default');");
                 }
 
-                service.Variables["_MySQLPlugin::Password"] = dbPass;
+                service.Variables[MySqlStore.PasswordVariable] = dbPass;
                 service.Save();
             }
             finally
@@ -290,242 +266,96 @@ namespace MySqlModule.Controllers
             return JavaScript("window.location.reload(false);");
         }
 
-        [HttpGet]
-        public ActionResult DownloadBackup(int requestServiceId)
+        // Repairs services whose _MySQLPlugin::* variables were wiped externally (e.g. by a
+        // TCAdmin reinstall) by writing them back from the metadata store, and backfills the
+        // store for databases that predate it. Best-effort: never breaks the page.
+        private static void RestoreMissingVariables()
         {
-            var user = TCAdmin.SDK.Session.GetCurrentUser();
-            var services = Service.GetServices(user, false).Cast<Service>().ToList();
-
-            if (services.Find(x => x.ServiceId == requestServiceId) == null)
-                return HttpNotFound();
-
             try
             {
                 ObjectBase.GlobalSkipSecurityCheck = true;
 
-                var service = new Service(requestServiceId);
-                var server = new Server(service.ServerId);
-                var datacenter = new Datacenter(server.DatacenterId);
+                var user = TCAdmin.SDK.Session.GetCurrentUser();
+                var services = Service.GetServices(user, false).Cast<Service>().ToList();
 
-                var dbName = service.Variables["_MySQLPlugin::Database"]?.ToString();
-                if (string.IsNullOrEmpty(dbName))
-                    return HttpNotFound();
-
-                string host, rootUser, rootPass;
-
-                if (server.MySqlPluginUseDatacenter)
+                var groups = new Dictionary<string, KeyValuePair<MySqlHostConfig, List<Service>>>();
+                foreach (var service in services)
                 {
-                    host = datacenter.MySqlPluginIp;
-                    rootUser = datacenter.MySqlPluginRoot;
-                    rootPass = datacenter.MySqlPluginPassword;
-                }
-                else
-                {
-                    host = server.MySqlPluginIp;
-                    rootUser = server.MySqlPluginRoot;
-                    rootPass = server.MySqlPluginPassword;
-                }
+                    MySqlHostConfig config;
+                    try
+                    {
+                        config = MySqlStore.GetHostConfig(service);
+                    }
+                    catch
+                    {
+                        continue;
+                    }
 
-                string sqlDump;
-                using (var conn = new MySqlConnection($"server={host};user={rootUser};password={rootPass};database={dbName};SSL Mode=None;"))
-                {
-                    conn.Open();
-                    sqlDump = GenerateSqlDump(conn, dbName);
+                    if (!config.IsConfigured)
+                        continue;
+
+                    if (!groups.ContainsKey(config.Host))
+                        groups.Add(config.Host, new KeyValuePair<MySqlHostConfig, List<Service>>(config, new List<Service>()));
+
+                    groups[config.Host].Value.Add(service);
                 }
 
-                var fileName = $"{dbName}_{DateTime.UtcNow:yyyyMMdd_HHmmss}.sql";
-                return File(Encoding.UTF8.GetBytes(sqlDump), "application/octet-stream", fileName);
+                foreach (var group in groups.Values)
+                {
+                    var config = group.Key;
+
+                    try
+                    {
+                        using (var conn = new MySqlConnection(config.GetConnectionString()))
+                        {
+                            conn.Open();
+                            MySqlStore.EnsureStore(conn);
+
+                            foreach (var service in group.Value)
+                            {
+                                var record = MySqlStore.GetRecord(conn, service.ServiceId);
+
+                                if (MySqlStore.HasDatabase(service))
+                                {
+                                    // Protect databases created before the metadata store existed.
+                                    if (record == null)
+                                    {
+                                        MySqlStore.Upsert(conn, service.ServiceId,
+                                            service.Variables[MySqlStore.UsernameVariable].ToString(),
+                                            service.Variables[MySqlStore.DatabaseVariable].ToString(),
+                                            service.Variables[MySqlStore.PasswordVariable].ToString(),
+                                            config.Host);
+                                    }
+                                }
+                                else if (record != null)
+                                {
+                                    // Variables were wiped externally - write them back.
+                                    MySqlStore.ApplyVariables(new Service(service.ServiceId), config.Host,
+                                        record.Username, record.Password, record.Database);
+                                }
+                            }
+                        }
+                    }
+                    catch
+                    {
+                        // Host unreachable - the heal pass must never break the page.
+                    }
+                }
+            }
+            catch
+            {
+                // The heal pass must never break the page.
             }
             finally
             {
                 ObjectBase.GlobalSkipSecurityCheck = false;
             }
-        }
-
-        [HttpPost]
-        public ActionResult RestoreBackup(int requestServiceId, HttpPostedFileBase backupFile)
-        {
-            var user = TCAdmin.SDK.Session.GetCurrentUser();
-            var services = Service.GetServices(user, false).Cast<Service>().ToList();
-
-            if (services.Find(x => x.ServiceId == requestServiceId) == null)
-            {
-                return JavaScript(
-                    "TCAdmin.Ajax.ShowBasicDialog('Error', 'You don\\'t own this service');$('body').css('cursor', 'default');");
-            }
-
-            if (backupFile == null || backupFile.ContentLength == 0)
-            {
-                return JavaScript(
-                    "TCAdmin.Ajax.ShowBasicDialog('Error', 'No file selected!');$('body').css('cursor', 'default');");
-            }
-
-            if (backupFile.ContentLength > 50 * 1024 * 1024)
-            {
-                return JavaScript(
-                    "TCAdmin.Ajax.ShowBasicDialog('Error', 'Backup file must be under 50MB!');$('body').css('cursor', 'default');");
-            }
-
-            try
-            {
-                ObjectBase.GlobalSkipSecurityCheck = true;
-
-                var service = new Service(requestServiceId);
-                var server = new Server(service.ServerId);
-                var datacenter = new Datacenter(server.DatacenterId);
-
-                var dbName = service.Variables["_MySQLPlugin::Database"]?.ToString();
-                if (string.IsNullOrEmpty(dbName))
-                {
-                    return JavaScript(
-                        "TCAdmin.Ajax.ShowBasicDialog('Error', 'No database is configured for this service!');$('body').css('cursor', 'default');");
-                }
-
-                string host, rootUser, rootPass;
-
-                if (server.MySqlPluginUseDatacenter)
-                {
-                    host = datacenter.MySqlPluginIp;
-                    rootUser = datacenter.MySqlPluginRoot;
-                    rootPass = datacenter.MySqlPluginPassword;
-                }
-                else
-                {
-                    host = server.MySqlPluginIp;
-                    rootUser = server.MySqlPluginRoot;
-                    rootPass = server.MySqlPluginPassword;
-                }
-
-                string sql;
-                using (var reader = new StreamReader(backupFile.InputStream, Encoding.UTF8))
-                    sql = reader.ReadToEnd();
-
-                try
-                {
-                    using (var conn = new MySqlConnection($"server={host};user={rootUser};password={rootPass};database={dbName};SSL Mode=None;"))
-                    {
-                        conn.Open();
-                        var script = new MySqlScript(conn, sql);
-                        script.Execute();
-                    }
-                }
-                catch (Exception ex)
-                {
-                    var msg = ex.Message.Replace("'", "\\'").Replace("\r\n", " ").Replace("\n", " ");
-                    return JavaScript(
-                        $"TCAdmin.Ajax.ShowBasicDialog('Error', 'Restore failed: {msg}');$('body').css('cursor', 'default');");
-                }
-            }
-            finally
-            {
-                ObjectBase.GlobalSkipSecurityCheck = false;
-            }
-
-            return JavaScript(
-                "TCAdmin.Ajax.ShowBasicDialog('Success', 'Database restored successfully!');setTimeout(function(){ window.location.reload(false); }, 2000);");
-        }
-
-        private static void Execute(MySqlConnection conn, string sql)
-        {
-            var cmd = conn.CreateCommand();
-            cmd.CommandText = sql;
-            cmd.ExecuteNonQuery();
-        }
-
-        private static bool HasDatabase(Service service)
-        {
-            var username = service.Variables["_MySQLPlugin::Username"];
-            return username != null && !string.IsNullOrEmpty(username.ToString());
-        }
-
-        private static string GenerateSqlDump(MySqlConnection conn, string dbName)
-        {
-            var sb = new StringBuilder();
-            sb.AppendLine("-- TCAdmin MySQL Module Backup");
-            sb.AppendLine($"-- Database: {dbName}");
-            sb.AppendLine($"-- Date: {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC");
-            sb.AppendLine();
-            sb.AppendLine("SET FOREIGN_KEY_CHECKS=0;");
-            sb.AppendLine("SET SQL_MODE='NO_AUTO_VALUE_ON_ZERO';");
-            sb.AppendLine();
-
-            var tables = new List<string>();
-            var tablesCmd = conn.CreateCommand();
-            tablesCmd.CommandText = "SHOW TABLES;";
-            using (var reader = tablesCmd.ExecuteReader())
-                while (reader.Read())
-                    tables.Add(reader.GetString(0));
-
-            foreach (var table in tables)
-            {
-                sb.AppendLine($"-- Table: `{table}`");
-
-                var createCmd = conn.CreateCommand();
-                createCmd.CommandText = $"SHOW CREATE TABLE `{table}`;";
-                string createSql;
-                using (var reader = createCmd.ExecuteReader())
-                {
-                    reader.Read();
-                    createSql = reader.GetString(1);
-                }
-
-                sb.AppendLine($"DROP TABLE IF EXISTS `{table}`;");
-                sb.AppendLine(createSql + ";");
-                sb.AppendLine();
-
-                var dataCmd = conn.CreateCommand();
-                dataCmd.CommandText = $"SELECT * FROM `{table}`;";
-                using (var reader = dataCmd.ExecuteReader())
-                {
-                    if (!reader.HasRows) continue;
-
-                    var cols = string.Join(", ", Enumerable.Range(0, reader.FieldCount)
-                        .Select(i => $"`{reader.GetName(i)}`"));
-
-                    while (reader.Read())
-                    {
-                        var vals = string.Join(", ", Enumerable.Range(0, reader.FieldCount)
-                            .Select(i => FormatSqlValue(reader, i)));
-
-                        // Building SQL text for a downloadable dump file, not executing a query.
-                        // table/cols = server metadata from SHOW TABLES/SHOW CREATE TABLE;
-                        // vals = output of FormatSqlValue which applies MySqlHelper.EscapeString to all strings.
-                        sb.Append("INSERT INTO `").Append(table).Append("` (").Append(cols)
-                          .Append(") VALUES (").Append(vals).AppendLine(");");
-                    }
-                    sb.AppendLine();
-                }
-            }
-
-            sb.AppendLine("SET FOREIGN_KEY_CHECKS=1;");
-            return sb.ToString();
-        }
-
-        private static string FormatSqlValue(MySqlDataReader reader, int i)
-        {
-            if (reader.IsDBNull(i)) return "NULL";
-            var type = reader.GetFieldType(i);
-            var value = reader.GetValue(i);
-
-            if (type == typeof(byte[]))
-                return "0x" + BitConverter.ToString((byte[])value).Replace("-", "");
-            if (type == typeof(bool))
-                return (bool)value ? "1" : "0";
-            if (type == typeof(sbyte) || type == typeof(byte) || type == typeof(short) ||
-                type == typeof(ushort) || type == typeof(int) || type == typeof(uint) ||
-                type == typeof(long) || type == typeof(ulong) || type == typeof(float) ||
-                type == typeof(double) || type == typeof(decimal))
-                return value.ToString();
-            if (type == typeof(DateTime))
-                return $"'{((DateTime)value):yyyy-MM-dd HH:mm:ss}'";
-
-            return $"'{MySqlHelper.EscapeString(value.ToString())}'";
         }
 
         private static string GetDbUsername()
         {
             var user = TCAdmin.SDK.Session.GetCurrentUser();
-            return user.UserName + "_";
+            return Regex.Replace(user.UserName, "[^_a-zA-Z0-9]", "_") + "_";
         }
 
         private static List<SelectListItem> GetDbDeletionUsernames()
@@ -534,8 +364,8 @@ namespace MySqlModule.Controllers
             var services = Service.GetServices(user, false).Cast<Service>().ToList();
 
             return (from service in services
-                where HasDatabase(service)
-                let text = service.Variables["_MySQLPlugin::Database"].ToString()
+                where MySqlStore.HasDatabase(service)
+                let text = service.Variables[MySqlStore.DatabaseVariable].ToString()
                 select new SelectListItem { Text = text, Value = service.ServiceId.ToString() }).ToList();
         }
 
@@ -545,8 +375,8 @@ namespace MySqlModule.Controllers
             var services = Service.GetServices(user, false).Cast<Service>().ToList();
 
             return (from service in services
-                where HasDatabase(service)
-                let text = service.Variables["_MySQLPlugin::Database"].ToString()
+                where MySqlStore.HasDatabase(service)
+                let text = service.Variables[MySqlStore.DatabaseVariable].ToString()
                 select new SelectListItem { Text = text, Value = service.ServiceId.ToString() }).ToList();
         }
 
@@ -558,15 +388,31 @@ namespace MySqlModule.Controllers
             try
             {
                 ObjectBase.GlobalSkipSecurityCheck = true;
-                return (from service in services
-                    where HasDatabase(service)
-                    let mysqlHost = service.Variables["_MySQLPlugin::Host"].ToString()
-                    let mysqlUser = service.Variables["_MySQLPlugin::Username"].ToString()
-                    let mysqlPass = service.Variables["_MySQLPlugin::Password"].ToString()
-                    let mysqlDatabase = service.Variables["_MySQLPlugin::Database"].ToString()
-                    let datacenter = new Datacenter(new Server(service.ServerId).DatacenterId)
-                    select new MySqlGridViewModel(mysqlHost, mysqlDatabase, mysqlUser, mysqlPass,
-                        datacenter.Location, datacenter.MySqlPluginPhpMyAdmin, service.ServiceId.ToString())).ToList();
+
+                var rows = new List<MySqlGridViewModel>();
+                foreach (var service in services)
+                {
+                    if (!MySqlStore.HasDatabase(service))
+                        continue;
+
+                    try
+                    {
+                        var datacenter = new Datacenter(new Server(service.ServerId).DatacenterId);
+                        rows.Add(new MySqlGridViewModel(
+                            service.Variables[MySqlStore.HostVariable].ToString(),
+                            service.Variables[MySqlStore.DatabaseVariable].ToString(),
+                            service.Variables[MySqlStore.UsernameVariable].ToString(),
+                            service.Variables[MySqlStore.PasswordVariable].ToString(),
+                            datacenter.Location, datacenter.MySqlPluginPhpMyAdmin, service.ServiceId.ToString()));
+                    }
+                    catch
+                    {
+                        // A service whose server/datacenter no longer exists must not break the
+                        // whole grid - skip just that row.
+                    }
+                }
+
+                return rows;
             }
             finally
             {
@@ -586,7 +432,7 @@ namespace MySqlModule.Controllers
             var services = Service.GetServices(user, false).Cast<Service>().ToList();
 
             return (from service in services
-                where !HasDatabase(service)
+                where !MySqlStore.HasDatabase(service)
                 select new SelectListItem
                     { Text = service.ConnectionInfo + " - " + service.Name, Value = service.ServiceId.ToString() })
                 .ToList();
@@ -601,11 +447,18 @@ namespace MySqlModule.Controllers
             try
             {
                 ObjectBase.GlobalSkipSecurityCheck = true;
-                foreach (var datacenter in services
-                    .Select(service => new Datacenter(new Server(service.ServerId).DatacenterId))
-                    .Where(datacenter => !datacenters.Any(x => x.DatacenterId == datacenter.DatacenterId)))
+                foreach (var service in services)
                 {
-                    datacenters.Add(datacenter);
+                    try
+                    {
+                        var datacenter = new Datacenter(new Server(service.ServerId).DatacenterId);
+                        if (datacenters.All(x => x.DatacenterId != datacenter.DatacenterId))
+                            datacenters.Add(datacenter);
+                    }
+                    catch
+                    {
+                        // Skip services with a missing server/datacenter.
+                    }
                 }
             }
             finally

@@ -14,6 +14,7 @@ namespace MySqlModule.Models.MySql
         public List<SelectListItem> DeletionUsernames;
         public List<SelectListItem> ResetUsernames;
         public MySqlEligibleLocations EligibleLocations;
+        public List<MySqlGridViewModel> Databases;
     }
     public class MySqlEligibleLocations : BaseModel
     {

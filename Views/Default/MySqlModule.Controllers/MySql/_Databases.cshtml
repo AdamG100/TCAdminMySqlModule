@@ -1,57 +1,75 @@
-<div class="col-xl-8 col-lg-7">
-    <!-- Service Status Card -->
-    <div class="k-card shadow mb-4">
-        <!-- Card Header - Accordion -->
-        <div id="#CreateSQLCard" class="card-header py-3 d-flex flex-row align-items-center justify-content-between">
-            <h6 class="m-0 font-weight-bold text-primary">Configured Databases</h6>
-        </div>
-        <div class="k-card-body">
-            <div class="row">
-                <div class="col-l-3">
-                    @(Html.Kendo().Grid<MySqlModule.Models.MySql.MySqlGridViewModel>()
-                        .Name("MySQLGrid")
-                        .AllowCopy(true)
-                        .NoRecords("You haven't created any databases yet!")
-                        .Selectable(selectable => selectable.Mode(GridSelectionMode.Multiple).Type(GridSelectionType.Cell))
-                        .Columns(columns =>
-                        {
-                            columns.Bound(c => c.DatabaseHost).HtmlAttributes(new { style = "white-space: nowrap" }).Title("DB Host").Width(200);
-                            columns.Bound(c => c.DatabaseName).HtmlAttributes(new { style = "white-space: nowrap" }).Title("DB Name");
-                            columns.Bound(c => c.DatabaseUsername).HtmlAttributes(new { style = "white-space: nowrap" }).Title("DB User").Width(150);
-                            columns.Bound(c => c.DatabasePassword).HtmlAttributes(new { style = "white-space: nowrap" }).Title("DB Pass").Width(150);
-                            columns.Bound(c => c.DatabaseLink).Hidden(true);
-                            columns.Bound(c => c.ServiceId).Hidden(true);
-                            columns.Command(c => c.Custom("Manage").Click("redirectToManage").Text("phpMyAdmin")).Width(120);
-                            columns.Command(c => c.Custom("Backup").Click("downloadBackup").Text("Backup")).Width(90);
-                            columns.Command(c => c.Custom("ManageService").Click("redirectToService").Text("Service")).Width(90);
-                        })
-                        .HtmlAttributes(new {style = "height: 550px; white-space: nowrap;"})
-                        .Scrollable()
-                        .DataSource(x =>
-                        {
-                            x.Ajax()
-                                .Read("DatabasesByUserRead", "MySql")
-                                .Group(a => a.Add(p => p.DatabaseLocation));
-                        })
-                        )
-                </div>
-            </div>
+@model List<MySqlModule.Models.MySql.MySqlGridViewModel>
+
+@helper Field(string label, string value, bool secret)
+{
+    <div class="mysql-field">
+        <span class="mysql-field-label">@label</span>
+        <div class="mysql-field-value-wrap">
+            <span class="mysql-field-value" data-value="@value">@(secret ? "••••••••••" : value)</span>
+            @if (secret)
+            {
+                <button type="button" class="mysql-icon-btn mysql-reveal" title="Show / hide"><i class="fas fa-eye"></i></button>
+            }
+            <button type="button" class="mysql-icon-btn mysql-copy" data-copy="@value" title="Copy @label"><i class="fas fa-copy"></i></button>
         </div>
     </div>
+}
+
+<div class="col-xl-8 col-lg-7">
+    <div class="mysql-db-panel">
+        <div class="mysql-panel-head">
+            <h6 class="mysql-panel-title">Configured Databases</h6>
+            <span class="mysql-db-count">@Model.Count</span>
+        </div>
+
+        @if (Model.Count == 0)
+        {
+            <div class="mysql-empty">
+                <div class="mysql-empty-icon"><i class="fas fa-database"></i></div>
+                <div>You haven't created any databases yet.</div>
+            </div>
+        }
+        else
+        {
+            <div class="mysql-db-grid">
+                @foreach (var db in Model)
+                {
+                    <div class="mysql-db-card">
+                        <div class="mysql-db-card-head">
+                            <div class="mysql-db-name" title="@db.DatabaseName">@db.DatabaseName</div>
+                            <span class="mysql-loc-badge"><i class="fas fa-map-marker-alt"></i> @db.DatabaseLocation</span>
+                        </div>
+                        <div class="mysql-fields">
+                            @Field("Host", db.DatabaseHost, false)
+                            @Field("Database", db.DatabaseName, false)
+                            @Field("Username", db.DatabaseUsername, false)
+                            @Field("Password", db.DatabasePassword, true)
+                        </div>
+                        <div class="mysql-db-actions">
+                            @{
+                                var isLocal = db.DatabaseHost == "localhost" || db.DatabaseHost == "127.0.0.1";
+                                var hasLink = !string.IsNullOrEmpty(db.DatabaseLink);
+                            }
+                            @if (!isLocal && hasLink)
+                            {
+                                <form id="pma-@db.ServiceId" method="post" action="@(db.DatabaseLink)index.php"
+                                      target="_blank" style="display:none">
+                                    <input type="hidden" name="pma_username" value="@db.DatabaseUsername" />
+                                    <input type="hidden" name="pma_password" value="@db.DatabasePassword" />
+                                    <input type="hidden" name="server" value="1" />
+                                </form>
+                                <button type="button" class="mysql-btn mysql-btn-primary"
+                                        onclick="document.getElementById('pma-@db.ServiceId').submit()">
+                                    <i class="fas fa-external-link-alt"></i> phpMyAdmin
+                                </button>
+                            }
+                            <a class="mysql-btn mysql-btn-ghost" target="_blank" rel="noopener" href="/Service/Home/@db.ServiceId">
+                                <i class="fas fa-server"></i> Service
+                            </a>
+                        </div>
+                    </div>
+                }
+            </div>
+        }
+    </div>
 </div>
-<script>
-    function redirectToManage(e) {
-        const dataItem = this.dataItem($(e.currentTarget).closest("tr"));
-        const link = dataItem.DatabaseLink + "index.php?pma_username=" + dataItem.DatabaseUsername;
-        window.open(link, "_blank");
-    }
-    function redirectToService(e) {
-        const dataItem = this.dataItem($(e.currentTarget).closest("tr"));
-        const link = "/Service/Home/" + dataItem.ServiceId;
-        window.open(link, "_blank");
-    }
-    function downloadBackup(e) {
-        const dataItem = this.dataItem($(e.currentTarget).closest("tr"));
-        window.location.href = "/MySqlModule/MySql/DownloadBackup?requestServiceId=" + dataItem.ServiceId;
-    }
-</script>

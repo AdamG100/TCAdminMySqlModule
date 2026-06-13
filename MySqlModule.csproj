@@ -40,8 +40,16 @@
         <HintPath>packages\Microsoft.Web.Infrastructure.1.0.0.0\lib\net40\Microsoft.Web.Infrastructure.dll</HintPath>
         <Private>True</Private>
       </Reference>
-      <Reference Include="MySql.Data, Version=6.7.9.0, Culture=neutral, PublicKeyToken=c5687fc88969c44d">
-        <HintPath>packages\MySql.Data.6.7.9\lib\net45\MySql.Data.dll</HintPath>
+      <Reference Include="MySql.Data, Version=8.0.33.0, Culture=neutral, PublicKeyToken=c5687fc88969c44d">
+        <HintPath>lib\MySql.Data.dll</HintPath>
+        <Private>True</Private>
+      </Reference>
+      <Reference Include="MySqlBackup, Version=2.3.3.0, Culture=neutral, processorArchitecture=MSIL">
+        <HintPath>lib\MySqlBackup.dll</HintPath>
+        <Private>True</Private>
+      </Reference>
+      <Reference Include="Ubiety.Dns.Core, Version=2.2.1.0, Culture=neutral, processorArchitecture=MSIL">
+        <HintPath>lib\Ubiety.Dns.Core.dll</HintPath>
         <Private>True</Private>
       </Reference>
       <Reference Include="System" />
@@ -178,6 +186,8 @@
     </ItemGroup>
     <ItemGroup>
       <Compile Include="Controllers\MySQLController.cs" />
+      <Compile Include="Helpers\EventHandler.cs" />
+      <Compile Include="Helpers\MySqlStore.cs" />
       <Compile Include="Models\MySQL\MySQLViewModel.cs" />
       <Compile Include="Properties\AssemblyInfo.cs" />
     </ItemGroup>
@@ -192,11 +202,29 @@
       <None Include="packages.config" />
     </ItemGroup>
     <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
-    <!-- To modify your build process, add your task inside one of the targets below and uncomment it. 
-         Other similar extension points exist, see Microsoft.Common.targets.
-    <Target Name="BeforeBuild">
+    <!-- Assembles the deployable TCAdmin module package after every build. The layout mirrors
+         what TCAdmin expects: the module DLL + its three runtime dependencies at the package
+         root and again under Monitor\ (for the agent), plus the manifest, SQL profiles and Views. -->
+    <Target Name="PackageModule" AfterTargets="Build">
+        <PropertyGroup>
+            <PackageDir>$(MSBuildProjectDirectory)\dist</PackageDir>
+        </PropertyGroup>
+        <ItemGroup>
+            <PackageDll Include="$(OutDir)MySqlModule.dll" />
+            <PackageDll Include="$(OutDir)MySql.Data.dll" />
+            <PackageDll Include="$(OutDir)MySqlBackup.dll" />
+            <PackageDll Include="$(OutDir)Ubiety.Dns.Core.dll" />
+            <PackageMeta Include="Module.json" />
+            <PackageMeta Include="install.sql" />
+            <PackageMeta Include="uninstall.sql" />
+            <PackageViews Include="Views\**\*" />
+        </ItemGroup>
+        <RemoveDir Directories="$(PackageDir)" />
+        <MakeDir Directories="$(PackageDir);$(PackageDir)\Monitor" />
+        <Copy SourceFiles="@(PackageDll)" DestinationFolder="$(PackageDir)" />
+        <Copy SourceFiles="@(PackageDll)" DestinationFolder="$(PackageDir)\Monitor" />
+        <Copy SourceFiles="@(PackageMeta)" DestinationFolder="$(PackageDir)" />
+        <Copy SourceFiles="@(PackageViews)" DestinationFolder="$(PackageDir)\Views\%(RecursiveDir)" />
+        <Message Importance="high" Text="MySqlModule package assembled at $(PackageDir)" />
     </Target>
-    <Target Name="AfterBuild">
-    </Target>
-    -->
 </Project>
