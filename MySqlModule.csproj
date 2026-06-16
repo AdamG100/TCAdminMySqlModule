@@ -216,6 +216,7 @@
             <PackageDll Include="$(OutDir)Ubiety.Dns.Core.dll" />
             <PackageMeta Include="Module.json" />
             <PackageMeta Include="install.sql" />
+            <PackageMeta Include="update.sql" />
             <PackageMeta Include="uninstall.sql" />
             <PackageViews Include="Views\**\*" />
         </ItemGroup>
